@@ -1,7 +1,7 @@
 Option Explicit
 
 ' ************************************************************************************
-' MASTER MACRO: Assign this to your button for the one-click solution.
+' MASTER MACRO: Run this macro for the one-click solution.
 ' Executes Step 1 (Data Prep) and Step 2 (Bloomberg & Calc) sequentially.
 ' ************************************************************************************
 Sub RunAllProcesses_OneClick()
@@ -26,7 +26,8 @@ Sub RunAllProcesses_OneClick()
         Call Process_Step2_BloombergAndCalc(wbProcessed)
         
         ' Save the final combined data file
-        Application.DisplayAlerts = False ' To suppress overwrite warnings
+        Application.DisplayAlerts = False ' Suppress overwrite warnings
+        ' Save the file in the same directory as the macro workbook
         wbProcessed.SaveAs Filename:=ThisWorkbook.Path & "\" & OUTPUT_FILENAME, FileFormat:=xlOpenXMLWorkbook
         Application.DisplayAlerts = True
         
@@ -71,13 +72,17 @@ Function Process_Step1_DataPrep(ByVal sOutputName As String) As Workbook
     Dim wbATE As Workbook, wsATE As Worksheet, loATE As ListObject
     Dim wbOut As Workbook, wsOut As Worksheet
     
-    Dim sFilePath As String, r As Long
+    ' Main Loop/Index Variables
+    Dim sFilePath As String, r As Long, i As Long
     
     ' Column Index Variables for All Fund (Source Columns)
     Dim buCol As Long, fundGciCol As Long, reviewStatusCol As Long
     Dim invMgrCol As Long, iaGciCol As Long, fundNameCol As Long
     Dim fundCoperCol As Long, fundLEICol As Long, fundCodeCol As Long
     Dim currencyCol As Long, latestNavCol As Long, latestNavDateCol As Long
+    
+    ' Copy Variables (NEW/FIXED)
+    Dim lTargetCol As Long, lTargetRow As Long ' FIXED: lTargetRow was missing Dim
     
     ' Ticker mapping dictionary
     Dim tickerDict As Object
@@ -159,7 +164,6 @@ Function Process_Step1_DataPrep(ByVal sOutputName As String) As Workbook
     wsOut.Name = "CombinedData"
     
     ' Headers copy
-    Dim i As Long, lTargetCol As Long, lTargetRow As Long
     lTargetCol = 1
     For i = LBound(arrColIndices) To UBound(arrColIndices)
         If arrColIndices(i) > 0 Then
@@ -179,7 +183,7 @@ Function Process_Step1_DataPrep(ByVal sOutputName As String) As Workbook
         GoTo CloseAllFund
     End If
     
-    lTargetRow = 2
+    lTargetRow = 2 ' Initialized here
     For Each rCell In rngVisibleData.Columns(1).Cells
         If rCell.Row > loAllFund.HeaderRowRange.Row Then
             lTargetCol = 1
@@ -227,6 +231,7 @@ CloseAllFund:
     ateFundGciCol = HeaderIndex(loATE, "Fund GCI")
     
     If ateFundGciCol = 0 Then
+        ' Warning: ATE match cannot be performed, but process continues
         MsgBox "Warning: ATE file is missing 'Fund GCI' column. Cannot perform ATE match.", vbExclamation
     Else
         lTargetCol = wsOut.Cells(1, wsOut.Columns.Count).End(xlToLeft).Column + 1
@@ -289,8 +294,9 @@ Sub Process_Step2_BloombergAndCalc(ByVal wbTarget As Workbook)
     ' === Local Declarations ===
     Dim ws As Worksheet
     Set ws = wbTarget.Sheets("CombinedData")
-    Dim lRow As Long: lRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
-    
+    Dim lRow As Long: lRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row ' FIXED: lRow Dim added/checked
+    Dim r As Long ' FIXED: r Dim added
+
     ' Output Columns Indexing
     Dim tickerCol As Long: tickerCol = FindHeaderInSheet(ws, "Ticker")
     Dim bbStatusCol As Long: bbStatusCol = FindHeaderInSheet(ws, "BB Status")
@@ -298,6 +304,8 @@ Sub Process_Step2_BloombergAndCalc(ByVal wbTarget As Workbook)
     Dim latestNavCol As Long: latestNavCol = FindHeaderInSheet(ws, "Latest NAV")
     Dim deltaCol As Long: deltaCol = FindHeaderInSheet(ws, "Delta")
     Dim commentsCol As Long: commentsCol = FindHeaderInSheet(ws, "Comment")
+    ' FIXED: bbCcyCol Dim added (even if not strictly used in current logic)
+    Dim bbCcyCol As Long: bbCcyCol = FindHeaderInSheet(ws, "BB ccy") 
 
     If lRow < 2 Then Exit Sub ' No data
 
@@ -330,16 +338,22 @@ Sub Process_Step2_BloombergAndCalc(ByVal wbTarget As Workbook)
     ws.Cells(2, navCol).FormulaR1C1 = _
         "=IFERROR(BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sTargetDate & """,""" & sTargetDate & """,""points=1""),""#N/A"")"
         
+    ' BB Currency Formula (Optional BDP)
+    ws.Cells(2, bbCcyCol).FormulaR1C1 = _
+        "=IFERROR(BDP(RC" & tickerCol & ",""CURRENCY""),""#N/A"")"
+
     ' Fill formulas down
     ws.Range(ws.Cells(2, bbStatusCol), ws.Cells(lRow, bbStatusCol)).FillDown
     ws.Range(ws.Cells(2, navCol), ws.Cells(lRow, navCol)).FillDown
+    ws.Range(ws.Cells(2, bbCcyCol), ws.Cells(lRow, bbCcyCol)).FillDown ' Fixed: FillDown for Ccy
 
     ' Wait for data fetch
     Application.Calculate
     
-    ' Convert formulas to values (BB Status, NAV)
+    ' Convert formulas to values (BB Status, NAV, BB Ccy)
     ws.Columns(bbStatusCol).Copy: ws.Columns(bbStatusCol).PasteSpecial xlPasteValues
     ws.Columns(navCol).Copy: ws.Columns(navCol).PasteSpecial xlPasteValues
+    ws.Columns(bbCcyCol).Copy: ws.Columns(bbCcyCol).PasteSpecial xlPasteValues ' Fixed: Ccy paste values
     Application.CutCopyMode = False
     
     ' === 3. BLOOMBERG FORMULA APPLICATION (PASS 2: Date Range for #N/A) ===
