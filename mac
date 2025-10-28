@@ -1,0 +1,373 @@
+Option Explicit
+
+' ************************************************************************************
+' Macro: MasterDataProcessorV3_Step1
+' Purpose: Imports 3 files, filters All Fund, maps Tickers, matches ATE, 
+'          and prepares data in a new workbook.
+' ************************************************************************************
+Sub MasterDataProcessorV3_Step1()
+
+    ' === Declarations ===
+    Dim wbTicker As Workbook, wsTicker As Worksheet, loTicker As ListObject
+    Dim wbAllFund As Workbook, wsAllFund As Worksheet, loAllFund As ListObject
+    Dim wbATE As Workbook, wsATE As Worksheet, loATE As ListObject
+    Dim wbOut As Workbook, wsOut As Worksheet
+    
+    Dim sFilePath As String, r As Long, lRow As Long
+    
+    ' Column Index Variables for All Fund (Source Columns)
+    Dim buCol As Long, fundGciCol As Long, reviewStatusCol As Long
+    Dim invMgrCol As Long, iaGciCol As Long, fundNameCol As Long
+    Dim fundCoperCol As Long, fundLEICol As Long, fundCodeCol As Long
+    Dim currencyCol As Long, latestNavCol As Long, latestNavDateCol As Long
+    ' <<< Add new source columns here if needed: Dim newSrcCol As Long >>>
+    
+    ' Column Index Variables for Output (New Columns)
+    Dim outTickerCol As Long, outATECol As Long
+    
+    ' === Performance Optimization (Best Practice) ===
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.Calculation = xlCalculationManual
+    
+    On Error GoTo ErrHandler
+    
+    ' ************************************************************************************
+    '                              PART A: FILE IMPORTS
+    ' ************************************************************************************
+
+    ' 1. Pick All Funds File (CSV)
+    sFilePath = GetFilePath("Select the All Funds CSV file")
+    If sFilePath = "" Then GoTo SafeExit
+    Set wbAllFund = Workbooks.Open(sFilePath)
+    Set wsAllFund = wbAllFund.Sheets(1)
+    
+    ' 2. Pick ATE File (CSV)
+    sFilePath = GetFilePath("Select the ATE CSV file")
+    If sFilePath = "" Then GoTo SafeExit
+    Set wbATE = Workbooks.Open(sFilePath)
+    Set wsATE = wbATE.Sheets(1)
+    
+    ' 3. Pick BB Ticker File (Excel)
+    sFilePath = GetFilePath("Select the BB Ticker Excel file")
+    If sFilePath = "" Then GoTo SafeExit
+    Set wbTicker = Workbooks.Open(sFilePath)
+    Set wsTicker = wbTicker.Sheets(1)
+    Set loTicker = SetupListObject(wsTicker, "TickerTbl")
+
+    ' ************************************************************************************
+    '                     PART B: ALL FUND FILTERING & DATA PREP
+    ' ************************************************************************************
+
+    ' A) Delete First Row and Convert to ListObject
+    If wsAllFund.UsedRange.Rows.Count > 0 Then wsAllFund.Rows(1).Delete ' 1st row delete
+    lRow = wsAllFund.Cells(wsAllFund.Rows.Count, 1).End(xlUp).Row
+    Set loAllFund = SetupListObject(wsAllFund, "AllFundsTbl")
+    
+    ' B) Header Indexing (Finding Column Positions)
+    
+    ' <<< CONFIGURATION START: ALL FUND SOURCE HEADERS >>>
+    ' (Yahan aap apne All Fund file ke headers ki exact spelling use karein)
+    buCol = HeaderIndex(loAllFund, "Business Unit")
+    invMgrCol = HeaderIndex(loAllFund, "Investment Manager")
+    iaGciCol = HeaderIndex(loAllFund, "IA GCI")
+    reviewStatusCol = HeaderIndex(loAllFund, "Review status")
+    fundNameCol = HeaderIndex(loAllFund, "Fund name")
+    fundGciCol = HeaderIndex(loAllFund, "Fund GCI")
+    fundCoperCol = HeaderIndex(loAllFund, "Fund Coper")
+    fundLEICol = HeaderIndex(loAllFund, "Fund LEI")
+    fundCodeCol = HeaderIndex(loAllFund, "Fund code")
+    currencyCol = HeaderIndex(loAllFund, "Currency")
+    latestNavCol = HeaderIndex(loAllFund, "Latest NAV")
+    latestNavDateCol = HeaderIndex(loAllFund, "Latest NAV date")
+    
+    If buCol = 0 Then Err.Raise vbObjectError + 702, , "'Business Unit' column not found."
+    If fundGciCol = 0 Then Err.Raise vbObjectError + 703, , "'Fund GCI' column not found."
+    ' <<< CONFIGURATION END: ALL FUND SOURCE HEADERS >>>
+    
+    ' C) Initial Filtering by Business Unit
+    Dim vBuFilter As Variant
+    vBuFilter = Array("FI-EMEA", "FI-US", "FI-GMC-Asia") 
+    loAllFund.Range.AutoFilter Field:=buCol, Criteria1:=vBuFilter, Operator:=xlFilterValues
+    
+    ' ************************************************************************************
+    '                         PART C: TICKER MAPPING & FILTERING
+    ' ************************************************************************************
+    
+    ' D) Ticker Dictionary Banana
+    Dim tickerDict As Object
+    Set tickerDict = CreateObject("Scripting.Dictionary")
+    
+    Dim dbFundGciCol As Long, dbTickerCol As Long
+    dbFundGciCol = HeaderIndex(loTicker, "Fund GCI") 
+    dbTickerCol = HeaderIndex(loTicker, "Ticker")   
+    
+    If dbFundGciCol = 0 Or dbTickerCol = 0 Then
+        MsgBox "Error: Ticker file is missing 'Fund GCI' or 'Ticker' column.", vbCritical
+        GoTo SafeExit
+    End If
+    
+    ' Load Ticker data into Dictionary
+    With loTicker.DataBodyRange
+        For r = 1 To .Rows.Count
+            tickerDict(Trim(.Cells(r, dbFundGciCol).Value)) = .Cells(r, dbTickerCol).Value
+        Next r
+    End With
+    
+    ' Close Ticker file
+    wbTicker.Close savechanges:=False
+    
+    ' E) Filtered Data Copy to New Workbook & Ticker Mapping
+    
+    ' Select only the required columns (Headers + Data)
+    ' This makes the process much faster and cleaner
+    Dim arrColIndices As Variant
+    
+    ' <<< CONFIGURATION START: COLUMNS TO COPY TO NEW FILE (1-BASED INDEX) >>>
+    ' Is list mein sirf unhi columns ke index daalein jo aapko All Fund se nikalne hain.
+    arrColIndices = Array(buCol, invMgrCol, iaGciCol, reviewStatusCol, fundNameCol, _
+                          fundGciCol, fundCoperCol, fundLEICol, fundCodeCol, currencyCol, _
+                          latestNavCol, latestNavDateCol)
+                          
+    ' Agar koi column Index '0' (not found) hai toh usko skip karna better hai,
+    ' Lekin filhaal humne critical check (buCol, fundGciCol) rakha hai.
+    ' <<< CONFIGURATION END: COLUMNS TO COPY TO NEW FILE >>>
+    
+    ' Filtered data ko copy karne ke liye temporary sheet banao
+    Set wbOut = Workbooks.Add(xlWBATWorksheet)
+    Set wsOut = wbOut.Sheets(1)
+    wsOut.Name = "RawData"
+    
+    ' Headers copy karna
+    Dim i As Long, lTargetCol As Long
+    lTargetCol = 1
+    For i = LBound(arrColIndices) To UBound(arrColIndices)
+        If arrColIndices(i) > 0 Then ' Only copy if column index was found
+            wsOut.Cells(1, lTargetCol).Value = loAllFund.HeaderRowRange.Cells(1, arrColIndices(i)).Value
+            lTargetCol = lTargetCol + 1
+        End If
+    Next i
+    
+    ' Filtered Data (visible rows) ko copy karna
+    Dim rngVisibleData As Range
+    On Error Resume Next
+    Set rngVisibleData = loAllFund.DataBodyRange.SpecialCells(xlCellTypeVisible)
+    On Error GoTo ErrHandler
+    
+    If rngVisibleData Is Nothing Then
+        MsgBox "No data found after Business Unit filter.", vbExclamation
+        GoTo CloseAllFund
+    End If
+    
+    ' Visible data ko copy/paste karna (Values mein)
+    Dim rngArea As Range, lTargetRow As Long
+    lTargetRow = 2
+    
+    For Each rngArea In rngVisibleData.Areas
+        For r = 1 To rngArea.Rows.Count
+            lTargetCol = 1
+            For i = LBound(arrColIndices) To UBound(arrColIndices)
+                If arrColIndices(i) > 0 Then
+                    wsOut.Cells(lTargetRow, lTargetCol).Value = rngArea.Cells(r, arrColIndices(i)).Value
+                    lTargetCol = lTargetCol + 1
+                End If
+            Next i
+            lTargetRow = lTargetRow + 1
+        Next r
+    Next rngArea
+    
+    ' All Fund file close karna
+CloseAllFund:
+    wbAllFund.Close savechanges:=False
+    
+    ' F) Ticker Mapping & Final Filtering (Jo Ticker mein mila, wahi data rakhna hai)
+    
+    ' Fund GCI column index ko wsOut mein dhundhna hoga
+    Dim outFundGciCol As Long
+    outFundGciCol = FindHeaderInSheet(wsOut, "Fund GCI")
+    
+    ' New Ticker column add karna
+    lTargetCol = wsOut.Cells(1, wsOut.Columns.Count).End(xlToLeft).Column + 1
+    wsOut.Cells(1, lTargetCol).Value = "Ticker"
+    outTickerCol = lTargetCol
+    
+    Dim fundGciValue As String
+    lTargetRow = wsOut.Cells(wsOut.Rows.Count, 1).End(xlUp).Row
+    
+    ' Loop to Map Ticker and Mark for Deletion
+    For r = lTargetRow To 2 Step -1 ' Reverse loop for deletion
+        fundGciValue = Trim(wsOut.Cells(r, outFundGciCol).Value)
+        
+        If tickerDict.Exists(fundGciValue) Then
+            ' Map Ticker
+            wsOut.Cells(r, outTickerCol).Value = tickerDict(fundGciValue)
+        Else
+            ' Delete row if no Ticker found
+            wsOut.Rows(r).Delete
+        End If
+    Next r
+    
+    
+    ' ************************************************************************************
+    '                         PART D: ATE MATCHING & NEW HEADERS
+    ' ************************************************************************************
+
+    ' G) Delete First Row of ATE and Setup ListObject
+    If wsATE.UsedRange.Rows.Count > 0 Then wsATE.Rows(1).Delete
+    Set loATE = SetupListObject(wsATE, "ATETbl")
+    
+    ' H) ATE Matching Logic
+    Dim ateFundGciCol As Long
+    ateFundGciCol = HeaderIndex(loATE, "Fund GCI") 
+    
+    If ateFundGciCol = 0 Then
+        MsgBox "Warning: ATE file is missing 'Fund GCI' column. Cannot perform ATE match.", vbExclamation
+    Else
+        ' New ATE column add karna
+        lTargetCol = wsOut.Cells(1, wsOut.Columns.Count).End(xlToLeft).Column + 1
+        wsOut.Cells(1, lTargetCol).Value = "ATE"
+        outATECol = lTargetCol
+        
+        ' Loop through output data and check ATE match
+        Dim ateDict As Object
+        Set ateDict = CreateObject("Scripting.Dictionary")
+        
+        ' Load all Fund GCI from ATE into a Dictionary for quick lookup
+        With loATE.DataBodyRange
+            For r = 1 To .Rows.Count
+                ateDict(Trim(.Cells(r, ateFundGciCol).Value)) = True ' Value doesn't matter, only existence
+            Next r
+        End With
+        
+        ' Apply YES/NO to Output sheet
+        lTargetRow = wsOut.Cells(wsOut.Rows.Count, 1).End(xlUp).Row
+        For r = 2 To lTargetRow
+            fundGciValue = Trim(wsOut.Cells(r, outFundGciCol).Value)
+            If ateDict.Exists(fundGciValue) Then
+                wsOut.Cells(r, outATECol).Value = "YES"
+            Else
+                wsOut.Cells(r, outATECol).Value = "NO"
+            End If
+        Next r
+    End If
+    
+    ' Close ATE file
+    wbATE.Close savechanges:=False
+    
+    ' I) Add Remaining New Headers
+    
+    ' <<< CONFIGURATION START: ADD REMAINING OUTPUT HEADERS >>>
+    ' New headers add karna
+    Call AddNewHeader(wsOut, "BB Status")
+    Call AddNewHeader(wsOut, "NAV")
+    Call AddNewHeader(wsOut, "BB ccy")
+    Call AddNewHeader(wsOut, "NAV date")
+    Call AddNewHeader(wsOut, "Delta")
+    Call AddNewHeader(wsOut, "Comment")
+    ' <<< CONFIGURATION END: ADD REMAINING OUTPUT HEADERS >>>
+    
+    ' ************************************************************************************
+    '                                   EXIT & CLEANUP
+    ' ************************************************************************************
+    
+    MsgBox "Step 1 Completed. Data is in a new workbook named 'RawData'. Please check and proceed.", vbInformation
+    
+SafeExit:
+    ' Final cleanup
+    Application.Calculation = xlCalculationAutomatic
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    
+    Exit Sub
+    
+ErrHandler:
+    ' Error handling
+    MsgBox "Error in Step 1: " & Err.Description & vbCrLf & "Process Failed", vbCritical
+    
+    ' Force cleanup in case of error
+    Application.Calculation = xlCalculationAutomatic
+    Application.DisplayAlerts = True
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    
+    If Not wbAllFund Is Nothing Then wbAllFund.Close savechanges:=False
+    If Not wbATE Is Nothing Then wbATE.Close savechanges:=False
+    If Not wbTicker Is Nothing Then wbTicker.Close savechanges:=False
+    ' If wbOut is open, keep it open for user to inspect error
+    
+    Resume SafeExit
+    
+End Sub
+
+' ************************************************************************************
+'                                  SUPPORT FUNCTIONS
+' ************************************************************************************
+
+Private Function HeaderIndex(ByVal lo As ListObject, ByVal headerName As String) As Long
+    ' Returns 1-based index (sheet column number)
+    Dim hdr As Range
+    For Each hdr In lo.HeaderRowRange.Cells
+        If LCase(Trim(hdr.Value)) = LCase(Trim(headerName)) Then
+            HeaderIndex = hdr.Column
+            Exit Function
+        End If
+    Next hdr
+    HeaderIndex = 0
+End Function
+
+Private Function FindHeaderInSheet(ByVal ws As Worksheet, ByVal headerName As String) As Long
+    ' Finds header in a regular sheet (not ListObject)
+    Dim rHeader As Range
+    Set rHeader = ws.Rows(1).Find(What:=headerName, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not rHeader Is Nothing Then
+        FindHeaderInSheet = rHeader.Column
+    Else
+        FindHeaderInSheet = 0
+    End If
+End Function
+
+Private Sub AddNewHeader(ByVal ws As Worksheet, ByVal headerName As String)
+    ' Adds a new header to the right of the existing columns
+    Dim lLastCol As Long
+    lLastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    If ws.Cells(1, lLastCol).Value <> "" Then lLastCol = lLastCol + 1
+    
+    ws.Cells(1, lLastCol).Value = headerName
+End Sub
+
+Private Function GetFilePath(ByVal sTitle As String) As String
+    ' Function to show File Picker dialog
+    Dim fldg As FileDialog
+    Set fldg = Application.FileDialog(msoFileDialogFilePicker)
+    With fldg
+        .Title = sTitle
+        .AllowMultiSelect = False
+        .Filters.Clear
+        If InStr(sTitle, "CSV") > 0 Then
+            .Filters.Add "CSV Files", "*.csv"
+        ElseIf InStr(sTitle, "Excel") > 0 Then
+            .Filters.Add "Excel Files", "*.xls;*.xlsx"
+        Else
+            .Filters.Add "All Files", "*.*"
+        End If
+        
+        If .Show = -1 Then GetFilePath = .SelectedItems(1) Else GetFilePath = ""
+    End With
+End Function
+
+Private Function SetupListObject(ByVal ws As Worksheet, ByVal sName As String) As ListObject
+    ' Function to convert data into ListObject
+    Dim lRow As Long
+    lRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    
+    ' Check for empty sheet
+    If lRow < 1 Then Err.Raise vbObjectError + 700, , "Selected sheet is empty."
+    
+    Set SetupListObject = ws.ListObjects.Add( _
+        SourceType:=xlSrcRange, _
+        Source:=ws.Range(ws.Cells(1, 1), ws.Cells(lRow, ws.UsedRange.Columns.Count)), _
+        XlListObjectHasHeaders:=xlYes)
+    SetupListObject.Name = sName
+End Function
