@@ -24,6 +24,8 @@ Sub RunAllProcesses_OneClick()
         ' 2. EXECUTION STEP 2: Bloomberg Data Extraction and Delta Calculation 
         Call Process_Bloomberg_And_Calculate(wbProcessed)
         
+        ' Note: Summary Stats are intentionally skipped in this version as requested.
+        
         ' Save the final combined data file
         Application.Calculation = xlCalculationAutomatic ' Set to auto before saving formulas
         Application.DisplayAlerts = False 
@@ -60,7 +62,7 @@ ErrHandler:
 End Sub
 
 ' ************************************************************************************
-' FUNCTION: Process_DataPrep_And_Merge (Headers Fixed for BDH logic - NAV column is now the BDH target)
+' FUNCTION: Process_DataPrep_And_Merge (Data Copying FIX Included)
 ' ************************************************************************************
 Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
 
@@ -260,11 +262,7 @@ CloseAllFund:
     
     ' I) Add Remaining New Headers for Step 2
     Call AddNewHeader(wsOut, "BB Status")
-    
-    ' Rename BB NAV Temp to NAV (as per user request: NAV column is the BDH target now)
-    Call AddNewHeader(wsOut, "BB NAV Date")  ' <-- Date output
-    Call AddNewHeader(wsOut, "NAV")          ' <-- Value output (BDH target)
-    
+    Call AddNewHeader(wsOut, "NAV")
     Call AddNewHeader(wsOut, "BB ccy")
     Call AddNewHeader(wsOut, "Delta")
     Call AddNewHeader(wsOut, "Comment")
@@ -284,7 +282,7 @@ SafeExit_Step1:
 End Function
 
 ' ************************************************************************************
-' SUBROUTINE: Process_Bloomberg_And_Calculate (BDH Fixed and Cleanup Removed)
+' SUBROUTINE: Process_Bloomberg_And_Calculate (Original Version)
 ' ************************************************************************************
 Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
@@ -304,7 +302,6 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Output Columns Indexing
     Dim tickerCol As Long: tickerCol = FindHeaderInSheet(ws, "Ticker")
     Dim bbStatusCol As Long: bbStatusCol = FindHeaderInSheet(ws, "BB Status")
-    Dim bbNavDateCol As Long: bbNavDateCol = FindHeaderInSheet(ws, "BB NAV Date") 
     Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")
     Dim latestNavCol As Long: latestNavCol = FindHeaderInSheet(ws, "Latest NAV")
     Dim latestNavDateCol As Long: latestNavDateCol = FindHeaderInSheet(ws, "Latest NAV date")
@@ -326,7 +323,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
         Title:="Bloomberg Range End Date", Type:=2)
     If sEndDate = "False" Or sEndDate = "" Then Exit Sub
 
-    ' === 2. BATCH PROCESSING LOOP (Applying single Date Range formula) ===
+    ' === 2. BATCH PROCESSING LOOP (Applying simple BDH formula) ===
     For lStartRow = 2 To lRow Step BATCH_SIZE
         lEndRow = lStartRow + BATCH_SIZE - 1
         If lEndRow > lRow Then lEndRow = lRow
@@ -336,10 +333,9 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
         ' BB Status Formula 
         ws.Cells(lStartRow, bbStatusCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""MARKET_STATUS""),""#N/A"")"
         
-        ' ** BDH FORMULA FIX (Applied to NAV column with col=2;rows=1) **
-        ' This outputs Date to BB NAV Date (left) and Value to NAV (target cell).
+        ' NAV Formula (Simple BDH)
         ws.Cells(lStartRow, navCol).FormulaR1C1 = _
-            "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sStartDate & """,""" & sEndDate & """,""points=1"",""col=2;rows=1"")"
+            "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sStartDate & """,""" & sEndDate & """,""points=1"")"
             
         ' BB Currency Formula 
         ws.Cells(lStartRow, bbCcyCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""CURRENCY""),""#N/A"")"
@@ -353,13 +349,11 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
         Application.Calculate 
         DoEvents 
         
-        ' NOTE: Linking and Cleanup logic is intentionally skipped as per user request.
-        
     Next lStartRow
     
-    ' === 3. DELTA CALCULATION & COMMENTING (No Cleanup logic) ===
+    ' === 3. DELTA CALCULATION & COMMENTING ===
     
-    ' Delta formula: (NAV - latest nav) / latest NAV (Formulas remain active)
+    ' Delta formula: (NAV - latest nav) / latest NAV 
     ws.Cells(2, deltaCol).FormulaR1C1 = "=IFERROR((RC" & navCol & " - RC" & latestNavCol & ") / RC" & latestNavCol & ", ""#N/A"")"
     ws.Range(ws.Cells(2, deltaCol), ws.Cells(lRow, deltaCol)).FillDown
     
@@ -369,14 +363,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Commenting Logic (Generic comment)
     ws.Range(ws.Cells(2, commentsCol), ws.Cells(lRow, commentsCol)).FormulaR1C1 = """CHECK DELTA AFTER BLOOMBERG REFRESH"""
     
-    ' === 4. LATEST NAV DATE FORMATTING FIX ===
-    
-    If lRow >= 2 Then
-        ' Apply MMDDYYYY format specifically to the Latest NAV Date column as requested
-        ws.Columns(latestNavDateCol).NumberFormat = "mmddyyyy" 
-        
-        ' BB NAV Date format is left untouched (General) as per user instruction.
-    End If
+    ' Note: Original code did not contain any specific formatting for Latest NAV date.
     
 End Sub
 
