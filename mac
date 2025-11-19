@@ -24,6 +24,9 @@ Sub RunAllProcesses_OneClick()
         ' 2. EXECUTION STEP 2: Bloomberg Data Extraction and Delta Calculation 
         Call Process_Bloomberg_And_Calculate(wbProcessed)
         
+        ' 3. EXECUTION STEP 3: Generate Summary Stats Sheet
+        Call Generate_Summary_Stats(wbProcessed)
+        
         ' Save the final combined data file
         Application.Calculation = xlCalculationAutomatic ' Set to auto before saving formulas
         Application.DisplayAlerts = False 
@@ -34,7 +37,7 @@ Sub RunAllProcesses_OneClick()
         ' Close the temporary processed file
         wbProcessed.Close savechanges:=False
         
-        MsgBox "SUCCESS! The entire data process is completed and the final file is saved as '" & OUTPUT_FILENAME & "' in the same folder as this macro file. ONLY Ticker-mapped funds remain, and formulas are active.", vbInformation
+        MsgBox "SUCCESS! The entire data process is completed and the final file is saved as '" & OUTPUT_FILENAME & "' in the same folder as this macro file. A 'Summary Stats' sheet has been created.", vbInformation
     Else
         MsgBox "Process stopped because no data was successfully prepared or no Tickers were matched.", vbExclamation
     End If
@@ -60,7 +63,7 @@ ErrHandler:
 End Sub
 
 ' ************************************************************************************
-' FUNCTION: Process_DataPrep_And_Merge (Data Copying FIX Included)
+' FUNCTION: Process_DataPrep_And_Merge 
 ' ************************************************************************************
 Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
 
@@ -197,7 +200,7 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
 CloseAllFund:
     wbAllFund.Close savechanges:=False
     
-    ' F) Ticker Mapping & FINAL FILTERING (Logic: Delete rows if Ticker is missing - REVERSE LOOP)
+    ' F) Ticker Mapping & FINAL FILTERING (Logic: Delete rows if Ticker is missing - REVERSE LOOP - Strict Ticker Deletion)
     Dim outFundGciCol As Long
     outFundGciCol = FindHeaderInSheet(wsOut, "Fund GCI")
     
@@ -260,6 +263,7 @@ CloseAllFund:
     
     ' I) Add Remaining New Headers for Step 2
     Call AddNewHeader(wsOut, "BB Status")
+    Call AddNewHeader(wsOut, "BB NAV Date") ' New column to store the date retrieved by BDH
     Call AddNewHeader(wsOut, "NAV")
     Call AddNewHeader(wsOut, "BB ccy")
     Call AddNewHeader(wsOut, "Delta")
@@ -271,7 +275,7 @@ CloseAllFund:
 ErrHandler_Step1:
     MsgBox "Error in Data Preparation: " & Err.Description & vbCrLf & "Process Failed.", vbCritical
     If Not wbAllFund Is Nothing Then wbAllFund.Close savechanges:=False
-    If Not wbATE Is Nothing Then wbATE.Close savechanges:=False
+    If Not wbATE Is Nothing Then wbAllFund.Close savechanges:=False
     If Not wbTicker Is Nothing Then wbTicker.Close savechanges:=False
     If Not wbOut Is Nothing Then wbOut.Close savechanges:=False
     
@@ -280,11 +284,12 @@ SafeExit_Step1:
 End Function
 
 ' ************************************************************************************
-' SUBROUTINE: Process_Bloomberg_And_Calculate (Correct Formula & Only Date Range Used)
+' SUBROUTINE: Process_Bloomberg_And_Calculate (Two-Pass BDH Logic implemented with Delta Comments)
 ' ************************************************************************************
 Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
-    ' === Date Input Variables (Only Start and End Date retained) ===
+    ' === Date Input Variables ===
+    Dim sTargetDate As String
     Dim sStartDate As String
     Dim sEndDate As String
     
@@ -300,69 +305,190 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Output Columns Indexing
     Dim tickerCol As Long: tickerCol = FindHeaderInSheet(ws, "Ticker")
     Dim bbStatusCol As Long: bbStatusCol = FindHeaderInSheet(ws, "BB Status")
+    Dim bbNavDateCol As Long: bbNavDateCol = FindHeaderInSheet(ws, "BB NAV Date") 
     Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")
     Dim latestNavCol As Long: latestNavCol = FindHeaderInSheet(ws, "Latest NAV")
+    Dim latestNavDateCol As Long: latestNavDateCol = FindHeaderInSheet(ws, "Latest NAV date")
     Dim deltaCol As Long: deltaCol = FindHeaderInSheet(ws, "Delta")
     Dim commentsCol As Long: commentsCol = FindHeaderInSheet(ws, "Comment")
     Dim bbCcyCol As Long: bbCcyCol = FindHeaderInSheet(ws, "BB ccy") 
 
     If lRow < 2 Then Exit Sub 
 
-    ' === 1. GET DATE INPUT FROM USER ===
+    ' === 1. GET DATE INPUT FROM USER (Target Date added back) ===
+    
+    sTargetDate = Application.InputBox( _
+        Prompt:="Enter Target NAV Date (YYYYMMDD, e.g., 20251028):", _
+        Title:="Bloomberg Target Date", Type:=2)
+    If sTargetDate = "False" Or sTargetDate = "" Then Exit Sub
     
     sStartDate = Application.InputBox( _
-        Prompt:="Enter NAV Start Date (YYYYMMDD, e.g., 20251020):", _
+        Prompt:="Enter Fallback Start Date (YYYYMMDD, e.g., 20251020):", _
         Title:="Bloomberg Range Start Date", Type:=2)
     If sStartDate = "False" Or sStartDate = "" Then Exit Sub
     
     sEndDate = Application.InputBox( _
-        Prompt:="Enter NAV End Date (YYYYMMDD, e.g., 20251028):", _
+        Prompt:="Enter Fallback End Date (YYYYMMDD, e.g., 20251028):", _
         Title:="Bloomberg Range End Date", Type:=2)
     If sEndDate = "False" Or sEndDate = "" Then Exit Sub
 
-    ' === 2. BATCH PROCESSING LOOP (Applying single Date Range formula) ===
+    ' === 2. BATCH PROCESSING LOOP ===
     For lStartRow = 2 To lRow Step BATCH_SIZE
         lEndRow = lStartRow + BATCH_SIZE - 1
         If lEndRow > lRow Then lEndRow = lRow
         
-        ' 2A. Apply Bloomberg Formulas 
-        
-        ' BB Status Formula (IFERROR retained here for stability if Ticker is bad)
+        ' 2A. Apply BB Status & Currency Formulas
         ws.Cells(lStartRow, bbStatusCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""MARKET_STATUS""),""#N/A"")"
-        
-        ' NAV Formula (BDH - Formula applied exactly as requested: WITHOUT IFERROR WRAPPER)
-        ws.Cells(lStartRow, navCol).FormulaR1C1 = _
-            "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sStartDate & """,""" & sEndDate & """,""points=1"")"
-            
-        ' BB Currency Formula (IFERROR retained here for stability if Ticker is bad)
         ws.Cells(lStartRow, bbCcyCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""CURRENCY""),""#N/A"")"
-
-        ' Fill formulas down for the current batch
+        
+        ' 2B. Apply Bloomberg Formulas (PASS 1: Target Date) to NAV column
+        ws.Cells(lStartRow, navCol).FormulaR1C1 = _
+            "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sTargetDate & """,""" & sTargetDate & """,""points=1"",""col=2;rows=1"")"
+            
+        ' Fill basic formulas down for the current batch
         ws.Range(ws.Cells(lStartRow, bbStatusCol), ws.Cells(lEndRow, bbStatusCol)).FillDown
-        ws.Range(ws.Cells(lStartRow, navCol), ws.Cells(lEndRow, navCol)).FillDown
         ws.Range(ws.Cells(lStartRow, bbCcyCol), ws.Cells(lEndRow, bbCcyCol)).FillDown
+        ws.Range(ws.Cells(lStartRow, navCol), ws.Cells(lEndRow, navCol)).FillDown
         
-        ' 2B. Force calculation and yield control to OS after each batch
-        Application.Calculate ' Force Excel to start processing formulas for this batch
-        DoEvents ' Give control back to the operating system to prevent freezing
+        ' 2C. Force calculation and yield control to OS after each batch
+        Application.Calculate 
+        DoEvents 
         
+        ' 2D. Apply Bloomberg Formulas (PASS 2: Date Range Fallback)
+        Dim r As Long
+        For r = lStartRow To lEndRow
+            ' Check if NAV column contains an error (like #N/A) or is empty
+            If IsError(ws.Cells(r, navCol).Value) Or Len(CStr(ws.Cells(r, navCol).Value)) < 3 Then
+                ' Apply the Date Range formula with required parameters
+                ws.Cells(r, navCol).FormulaR1C1 = _
+                    "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sStartDate & """,""" & sEndDate & """,""points=1"",""col=2;rows=1"")"
+            End If
+        Next r
+        
+        Application.Calculate 
+        DoEvents
+        
+        ' 2E. Extract Date into BB NAV Date column 
+        ' BDH output places the date in the column immediately to the left of the formula cell.
+        ' We link the BB NAV Date column (which is 1 column left of NAV) to that date output cell.
+        ws.Cells(lStartRow, bbNavDateCol).FormulaR1C1 = "=R[0]C[-1]"
+        ws.Range(ws.Cells(lStartRow, bbNavDateCol), ws.Cells(lEndRow, bbNavDateCol)).FillDown
+
+        ' Convert the NAV Date formulas to values immediately (Important for date formatting later)
+        ws.Range(ws.Cells(lStartRow, bbNavDateCol), ws.Cells(lEndRow, bbNavDateCol)).Value = _
+             ws.Range(ws.Cells(lStartRow, bbNavDateCol), ws.Cells(lEndRow, bbNavDateCol)).Value
+
     Next lStartRow
     
-    ' === 3. DELTA CALCULATION & COMMENTING (Apply to the entire final range) ===
+    ' === 3. DELTA CALCULATION & COMMENTING ===
     
     ' Delta formula: (NAV - latest nav) / latest NAV 
-    ' IFERROR added here to prevent #DIV/0! or #VALUE! if NAV or Latest NAV is missing
     ws.Cells(2, deltaCol).FormulaR1C1 = "=IFERROR((RC" & navCol & " - RC" & latestNavCol & ") / RC" & latestNavCol & ", ""#N/A"")"
-        
     ws.Range(ws.Cells(2, deltaCol), ws.Cells(lRow, deltaCol)).FillDown
     
-    ' Formatting for Delta
-    ws.Columns(deltaCol).NumberFormat = "0.00%"
+    ' Delta Threshold Commenting Logic (Nested IF)
+    Dim sCommentFormula As String
     
-    ' Commenting logic 
-    ws.Range(ws.Cells(2, commentsCol), ws.Cells(lRow, commentsCol)).Value = "CHECK DELTA AFTER BLOOMBERG REFRESH" 
+    ' Logic: 
+    ' 1. Check if Delta cell has error (#N/A) -> Use empty string ""
+    ' 2. Check Delta >= 100% (1.00) -> "Spike"
+    ' 3. Check Delta < -50% (-0.50) -> "Decline"
+    ' 4. Otherwise -> "Update"
+    
+    sCommentFormula = "=IF(ISERROR(RC" & deltaCol & "),"""",IF(RC" & deltaCol & ">=1,""Spike"",IF(RC" & deltaCol & "<-0.5,""Decline"",""Update"")))"
+
+    ws.Cells(2, commentsCol).FormulaR1C1 = sCommentFormula
+    ws.Range(ws.Cells(2, commentsCol), ws.Cells(lRow, commentsCol)).FillDown
+
+    ' Formatting
+    If lRow >= 2 Then
+        ws.Columns(deltaCol).NumberFormat = "0.00%"
+        ws.Columns(latestNavDateCol).NumberFormat = "yyyy-mm-dd" 
+        ws.Columns(bbNavDateCol).NumberFormat = "yyyy-mm-dd" 
+    End If
     
 End Sub
+
+' ************************************************************************************
+' NEW SUBROUTINE: Generate_Summary_Stats 
+' ************************************************************************************
+Sub Generate_Summary_Stats(ByVal wbTarget As Workbook)
+
+    Dim wsData As Worksheet
+    Dim wsPivot As Worksheet
+    Dim pvtCache As PivotCache
+    Dim pvtTable As PivotTable
+    Dim pvtDataRange As Range
+    Dim sDataRange As String
+    
+    ' Set the source data sheet
+    Set wsData = wbTarget.Sheets("CombinedData")
+    
+    ' Define the range for the PivotTable (entire used range)
+    On Error Resume Next
+    Set pvtDataRange = wsData.UsedRange
+    sDataRange = wsData.Name & "!" & pvtDataRange.Address(ReferenceStyle:=xlR1C1)
+    On Error GoTo 0
+    
+    If pvtDataRange Is Nothing Then Exit Sub ' Exit if no data found
+
+    ' Check if Summary Stats sheet already exists, delete it if it does
+    On Error Resume Next
+    Set wsPivot = wbTarget.Sheets("Summary Stats")
+    On Error GoTo 0
+    
+    If Not wsPivot Is Nothing Then
+        Application.DisplayAlerts = False
+        wsPivot.Delete
+        Application.DisplayAlerts = True
+    End If
+    
+    ' Add a new sheet for the PivotTable and name it
+    Set wsPivot = wbTarget.Sheets.Add(After:=wbTarget.Sheets(wbTarget.Sheets.Count))
+    wsPivot.Name = "Summary Stats"
+    
+    ' Create the Pivot Cache
+    Set pvtCache = wbTarget.PivotCaches.Create( _
+        SourceType:=xlDatabase, _
+        SourceData:=sDataRange)
+        
+    ' Create the Pivot Table
+    Set pvtTable = wsPivot.PivotTables.Add( _
+        PivotCache:=pvtCache, _
+        TableDestination:=wsPivot.Cells(1, 1), _
+        TableName:="SummaryPivot")
+        
+    ' Set the PivotTable layout
+    With pvtTable
+        ' Row Fields (Region -> Review Status -> ATE)
+        With .PivotFields("Business Unit")
+            .Orientation = xlRowField
+            .Position = 1
+        End With
+        With .PivotFields("Review status")
+            .Orientation = xlRowField
+            .Position = 2
+        End With
+        With .PivotFields("ATE")
+            .Orientation = xlRowField
+            .Position = 3
+        End With
+        
+        ' Column Field (Spike, Decline, Update)
+        With .PivotFields("Comment")
+            .Orientation = xlColumnField
+            .Position = 1
+        End With
+        
+        ' Data Field (Count of Funds)
+        .AddDataField .PivotFields("Fund name"), "Count of Funds", xlCount
+        
+        ' Apply formatting
+        .RowAxisLayout xlTabularRow
+    End With
+
+End Sub
+
 
 ' ************************************************************************************
 '                                  SUPPORT FUNCTIONS (No Change)
