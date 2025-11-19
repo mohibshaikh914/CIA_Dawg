@@ -60,7 +60,7 @@ ErrHandler:
 End Sub
 
 ' ************************************************************************************
-' FUNCTION: Process_DataPrep_And_Merge (Headers Fixed for BDH logic)
+' FUNCTION: Process_DataPrep_And_Merge (Headers Fixed for BDH logic - NAV column is now the BDH target)
 ' ************************************************************************************
 Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
 
@@ -258,11 +258,13 @@ CloseAllFund:
     
     wbATE.Close savechanges:=False
     
-    ' I) Add Remaining New Headers for Step 2 (Headers for BDH output and Delta)
+    ' I) Add Remaining New Headers for Step 2
     Call AddNewHeader(wsOut, "BB Status")
-    Call AddNewHeader(wsOut, "BB NAV Date")  ' <-- Date column (Left output)
-    Call AddNewHeader(wsOut, "NAV")          ' <-- Value column (Right output)
-    Call AddNewHeader(wsOut, "BB NAV Temp")  ' <-- Temporary column for BDH formula
+    
+    ' Rename BB NAV Temp to NAV (as per user request: NAV column is the BDH target now)
+    Call AddNewHeader(wsOut, "BB NAV Date")  ' <-- Date output
+    Call AddNewHeader(wsOut, "NAV")          ' <-- Value output (BDH target)
+    
     Call AddNewHeader(wsOut, "BB ccy")
     Call AddNewHeader(wsOut, "Delta")
     Call AddNewHeader(wsOut, "Comment")
@@ -282,7 +284,7 @@ SafeExit_Step1:
 End Function
 
 ' ************************************************************************************
-' SUBROUTINE: Process_Bloomberg_And_Calculate (Final BDH Logic and No Value Paste)
+' SUBROUTINE: Process_Bloomberg_And_Calculate (BDH Fixed and Cleanup Removed)
 ' ************************************************************************************
 Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
@@ -304,7 +306,6 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     Dim bbStatusCol As Long: bbStatusCol = FindHeaderInSheet(ws, "BB Status")
     Dim bbNavDateCol As Long: bbNavDateCol = FindHeaderInSheet(ws, "BB NAV Date") 
     Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")
-    Dim bbNavTempCol As Long: bbNavTempCol = FindHeaderInSheet(ws, "BB NAV Temp") 
     Dim latestNavCol As Long: latestNavCol = FindHeaderInSheet(ws, "Latest NAV")
     Dim latestNavDateCol As Long: latestNavDateCol = FindHeaderInSheet(ws, "Latest NAV date")
     Dim deltaCol As Long: deltaCol = FindHeaderInSheet(ws, "Delta")
@@ -335,9 +336,9 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
         ' BB Status Formula 
         ws.Cells(lStartRow, bbStatusCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""MARKET_STATUS""),""#N/A"")"
         
-        ' ** BDH FORMULA FIX (Applied to TEMP column with col=2;rows=1) **
-        ' This outputs Date to the left cell and Value to the target cell (BB NAV Temp)
-        ws.Cells(lStartRow, bbNavTempCol).FormulaR1C1 = _
+        ' ** BDH FORMULA FIX (Applied to NAV column with col=2;rows=1) **
+        ' This outputs Date to BB NAV Date (left) and Value to NAV (target cell).
+        ws.Cells(lStartRow, navCol).FormulaR1C1 = _
             "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sStartDate & """,""" & sEndDate & """,""points=1"",""col=2;rows=1"")"
             
         ' BB Currency Formula 
@@ -345,37 +346,18 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
         ' Fill formulas down for the current batch
         ws.Range(ws.Cells(lStartRow, bbStatusCol), ws.Cells(lEndRow, bbStatusCol)).FillDown
-        ws.Range(ws.Cells(lStartRow, bbNavTempCol), ws.Cells(lEndRow, bbNavTempCol)).FillDown
+        ws.Range(ws.Cells(lStartRow, navCol), ws.Cells(lEndRow, navCol)).FillDown
         ws.Range(ws.Cells(lStartRow, bbCcyCol), ws.Cells(lEndRow, bbCcyCol)).FillDown
         
         ' 2B. Force calculation and yield control to OS after each batch
         Application.Calculate 
         DoEvents 
         
-        ' ** LINKING BB NAV DATE (Left Cell) and NAV (Right Cell) using formulas **
-        
-        ' BB NAV Date (Date output) links to the cell left of BB NAV Temp
-        ' The cell index difference is: (bbNavTempCol - bbNavDateCol - 1)
-        ws.Cells(lStartRow, bbNavDateCol).FormulaR1C1 = "=RC[" & bbNavTempCol - bbNavDateCol - 1 & "]"
-        
-        ' NAV (Value output) links to the BB NAV Temp cell
-        ' The cell index difference is: (bbNavTempCol - navCol)
-        ws.Cells(lStartRow, navCol).FormulaR1C1 = "=RC[" & bbNavTempCol - navCol & "]"
-
-        ' Fill linking formulas down (NO .Value = .Value used)
-        ws.Range(ws.Cells(lStartRow, bbNavDateCol), ws.Cells(lEndRow, bbNavDateCol)).FillDown
-        ws.Range(ws.Cells(lStartRow, navCol), ws.Cells(lEndRow, navCol)).FillDown
+        ' NOTE: Linking and Cleanup logic is intentionally skipped as per user request.
         
     Next lStartRow
     
-    ' === 3. CLEANUP & DELTA CALCULATION ===
-    
-    ' Delete the temporary BB NAV Temp column (As this column is no longer needed)
-    ws.Columns(bbNavTempCol).Delete
-    
-    ' Re-index the Delta and Comment columns after deletion 
-    deltaCol = deltaCol - 1
-    commentsCol = commentsCol - 1
+    ' === 3. DELTA CALCULATION & COMMENTING (No Cleanup logic) ===
     
     ' Delta formula: (NAV - latest nav) / latest NAV (Formulas remain active)
     ws.Cells(2, deltaCol).FormulaR1C1 = "=IFERROR((RC" & navCol & " - RC" & latestNavCol & ") / RC" & latestNavCol & ", ""#N/A"")"
@@ -387,12 +369,13 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Commenting Logic (Generic comment)
     ws.Range(ws.Cells(2, commentsCol), ws.Cells(lRow, commentsCol)).FormulaR1C1 = """CHECK DELTA AFTER BLOOMBERG REFRESH"""
     
-    ' === 4. FORMATTING REMOVAL (As requested: Latest NAV date ka format as-is rehne do) ===
+    ' === 4. LATEST NAV DATE FORMATTING FIX ===
+    
     If lRow >= 2 Then
-        ' Set to General to avoid overwriting existing formats from the source file
-        ws.Columns(latestNavDateCol).NumberFormat = "General" 
-        ' Set to General (or no format) for the BB NAV Date output
-        ws.Columns(bbNavDateCol).NumberFormat = "General"
+        ' Apply MMDDYYYY format specifically to the Latest NAV Date column as requested
+        ws.Columns(latestNavDateCol).NumberFormat = "mmddyyyy" 
+        
+        ' BB NAV Date format is left untouched (General) as per user instruction.
     End If
     
 End Sub
