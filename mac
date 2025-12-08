@@ -260,7 +260,7 @@ CloseAllFund:
     
     ' I) Add Remaining New Headers for Step 2 (OLD NAV is renamed to NAV Date, new NAV is added)
     Call AddNewHeader(wsOut, "BB Status")
-    Call AddNewHeader(wsOut, "NAV Date")  ' <-- OLD NAV is now NAV Date (BDH output date lands here)
+    Call AddNewHeader(wsOut, "NAV Date")  ' <-- OLD NAV is now NAV Date (BDH formula is placed here)
     Call AddNewHeader(wsOut, "NAV")       ' <-- NEW NAV (BDH output value lands here)
     Call AddNewHeader(wsOut, "BB ccy")
     Call AddNewHeader(wsOut, "Delta")
@@ -281,7 +281,7 @@ SafeExit_Step1:
 End Function
 
 ' ************************************************************************************
-' SUBROUTINE: Process_Bloomberg_And_Calculate (New Date Logic, BDH fix, NAV restructuring)
+' SUBROUTINE: Process_Bloomberg_And_Calculate (New Date Logic, BDH in NAV Date column)
 ' ************************************************************************************
 Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
@@ -303,8 +303,8 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Output Columns Indexing
     Dim tickerCol As Long: tickerCol = FindHeaderInSheet(ws, "Ticker")
     Dim bbStatusCol As Long: bbStatusCol = FindHeaderInSheet(ws, "BB Status")
-    Dim navDateCol As Long: navDateCol = FindHeaderInSheet(ws, "NAV Date") ' Now the Date output target
-    Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")               ' Now the Value output target
+    Dim navDateCol As Long: navDateCol = FindHeaderInSheet(ws, "NAV Date") ' <-- BDH formula is placed here
+    Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")               ' <-- Value output lands here
     Dim latestNavCol As Long: latestNavCol = FindHeaderInSheet(ws, "Latest NAV")
     Dim latestNavDateCol As Long: latestNavDateCol = FindHeaderInSheet(ws, "Latest NAV date")
     Dim deltaCol As Long: deltaCol = FindHeaderInSheet(ws, "Delta")
@@ -327,6 +327,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     
     ' Calculate the Month End of the Start Date
     On Error Resume Next
+    ' Convert YYYYMMDD string to a Date object
     dStartDate = DateSerial(Left(sStartDate, 4), Mid(sStartDate, 5, 2), Right(sStartDate, 2))
     If Err.Number <> 0 Then
         MsgBox "Invalid Start Date format. Please use YYYYMMDD.", vbCritical
@@ -334,7 +335,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     End If
     On Error GoTo 0
     
-    ' Move to the first day of the NEXT month, then subtract 1 day to get month end
+    ' Calculate the last day of the month for dStartDate
     sMonthEndTarget = Format(DateSerial(Year(dStartDate), Month(dStartDate) + 1, 0), "yyyymmdd")
 
     ' === 2. BATCH PROCESSING LOOP (Applying BDH formula with bestfwd) ===
@@ -347,9 +348,9 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
         ' BB Status Formula 
         ws.Cells(lStartRow, bbStatusCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""MARKET_STATUS""),""#N/A"")"
         
-        ' ** BDH FORMULA FIX: Targets NAV (value) column. Uses Month End as start, End Date as end, and bestfwd=true **
-        ' This ensures: 1) Month End preference, 2) Closest NAV within range, 3) Date lands in NAV Date (left cell).
-        ws.Cells(lStartRow, navCol).FormulaR1C1 = _
+        ' ** BDH FORMULA FIX: Targets NAV Date column. Uses Month End as start, End Date as end, and bestfwd=true **
+        ' Parameter "col=2;rows=1" outputs Date (col 1) and Value (col 2). Date lands in NAV Date, Value lands in NAV (to the right).
+        ws.Cells(lStartRow, navDateCol).FormulaR1C1 = _
             "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sMonthEndTarget & """,""" & sEndDate & """,""points=1"",""col=2;rows=1"",""bestfwd=true"")"
             
         ' BB Currency Formula 
@@ -357,7 +358,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
         ' Fill formulas down for the current batch
         ws.Range(ws.Cells(lStartRow, bbStatusCol), ws.Cells(lEndRow, bbStatusCol)).FillDown
-        ws.Range(ws.Cells(lStartRow, navCol), ws.Cells(lEndRow, navCol)).FillDown
+        ws.Range(ws.Cells(lStartRow, navDateCol), ws.Cells(lEndRow, navDateCol)).FillDown ' <-- Target NAV Date column
         ws.Range(ws.Cells(lStartRow, bbCcyCol), ws.Cells(lEndRow, bbCcyCol)).FillDown
         
         ' 2B. Force calculation and yield control to OS after each batch
@@ -383,8 +384,6 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     If lRow >= 2 Then
         ' Apply MMDDYYYY format specifically to the Latest NAV Date column as requested
         ws.Columns(latestNavDateCol).NumberFormat = "mmddyyyy" 
-        
-        ' NAV Date (BDH output) is left as General/default format to display the date string correctly.
     End If
     
 End Sub
