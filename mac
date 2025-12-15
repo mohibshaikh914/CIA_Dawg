@@ -258,10 +258,10 @@ CloseAllFund:
     
     wbATE.Close savechanges:=False
     
-    ' I) Add Remaining New Headers for Step 2 (OLD NAV is renamed to NAV Date, new NAV is added)
+    ' I) Add Remaining New Headers for Step 2
     Call AddNewHeader(wsOut, "BB Status")
-    Call AddNewHeader(wsOut, "NAV Date")  ' <-- OLD NAV is now NAV Date (BDH formula is placed here)
-    Call AddNewHeader(wsOut, "NAV")       ' <-- NEW NAV (BDH output value lands here)
+    Call AddNewHeader(wsOut, "NAV Date")  ' <-- BDH formula placed here (Date output)
+    Call AddNewHeader(wsOut, "NAV")       ' <-- BDH output value lands here
     Call AddNewHeader(wsOut, "BB ccy")
     Call AddNewHeader(wsOut, "Delta")
     Call AddNewHeader(wsOut, "Comment")
@@ -281,7 +281,7 @@ SafeExit_Step1:
 End Function
 
 ' ************************************************************************************
-' SUBROUTINE: Process_Bloomberg_And_Calculate (New Date Logic, BDH in NAV Date column)
+' SUBROUTINE: Process_Bloomberg_And_Calculate (BDH in NAV Date column, bestfwd removed)
 ' ************************************************************************************
 Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
@@ -303,8 +303,8 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Output Columns Indexing
     Dim tickerCol As Long: tickerCol = FindHeaderInSheet(ws, "Ticker")
     Dim bbStatusCol As Long: bbStatusCol = FindHeaderInSheet(ws, "BB Status")
-    Dim navDateCol As Long: navDateCol = FindHeaderInSheet(ws, "NAV Date") ' <-- BDH formula is placed here
-    Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")               ' <-- Value output lands here
+    Dim navDateCol As Long: navDateCol = FindHeaderInSheet(ws, "NAV Date") 
+    Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")               
     Dim latestNavCol As Long: latestNavCol = FindHeaderInSheet(ws, "Latest NAV")
     Dim latestNavDateCol As Long: latestNavDateCol = FindHeaderInSheet(ws, "Latest NAV date")
     Dim deltaCol As Long: deltaCol = FindHeaderInSheet(ws, "Delta")
@@ -338,7 +338,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Calculate the last day of the month for dStartDate
     sMonthEndTarget = Format(DateSerial(Year(dStartDate), Month(dStartDate) + 1, 0), "yyyymmdd")
 
-    ' === 2. BATCH PROCESSING LOOP (Applying BDH formula with bestfwd) ===
+    ' === 2. BATCH PROCESSING LOOP (Applying BDH formula) ===
     For lStartRow = 2 To lRow Step BATCH_SIZE
         lEndRow = lStartRow + BATCH_SIZE - 1
         If lEndRow > lRow Then lEndRow = lRow
@@ -348,17 +348,17 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
         ' BB Status Formula 
         ws.Cells(lStartRow, bbStatusCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""MARKET_STATUS""),""#N/A"")"
         
-        ' ** BDH FORMULA FIX: Targets NAV Date column. Uses Month End as start, End Date as end, and bestfwd=true **
-        ' Parameter "col=2;rows=1" outputs Date (col 1) and Value (col 2). Date lands in NAV Date, Value lands in NAV (to the right).
+        ' ** BDH FORMULA: Targets NAV Date column. Uses Month End as start, End Date as end. **
+        ' Parameter "col=2;rows=1" outputs Date (col 1) in NAV Date, and Value (col 2) in NAV.
         ws.Cells(lStartRow, navDateCol).FormulaR1C1 = _
-            "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sMonthEndTarget & """,""" & sEndDate & """,""points=1"",""col=2;rows=1"",""bestfwd=true"")"
+            "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sMonthEndTarget & """,""" & sEndDate & """,""points=1"",""col=2;rows=1"")"
             
         ' BB Currency Formula 
         ws.Cells(lStartRow, bbCcyCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""CURRENCY""),""#N/A"")"
 
         ' Fill formulas down for the current batch
         ws.Range(ws.Cells(lStartRow, bbStatusCol), ws.Cells(lEndRow, bbStatusCol)).FillDown
-        ws.Range(ws.Cells(lStartRow, navDateCol), ws.Cells(lEndRow, navDateCol)).FillDown ' <-- Target NAV Date column
+        ws.Range(ws.Cells(lStartRow, navDateCol), ws.Cells(lEndRow, navDateCol)).FillDown
         ws.Range(ws.Cells(lStartRow, bbCcyCol), ws.Cells(lEndRow, bbCcyCol)).FillDown
         
         ' 2B. Force calculation and yield control to OS after each batch
@@ -369,7 +369,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     
     ' === 3. DELTA CALCULATION & COMMENTING ===
     
-    ' Delta formula: (NAV - latest nav) / latest NAV (Correctly references the new NAV column index)
+    ' Delta formula: (NAV - latest nav) / latest NAV (References the new NAV column index)
     ws.Cells(2, deltaCol).FormulaR1C1 = "=IFERROR((RC" & navCol & " - RC" & latestNavCol & ") / RC" & latestNavCol & ", ""#N/A"")"
     ws.Range(ws.Cells(2, deltaCol), ws.Cells(lRow, deltaCol)).FillDown
     
@@ -382,7 +382,7 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' === 4. LATEST NAV DATE FORMATTING FIX ===
     
     If lRow >= 2 Then
-        ' Apply MMDDYYYY format specifically to the Latest NAV Date column as requested
+        ' Apply MMDDYYYY format specifically to the Latest NAV Date column
         ws.Columns(latestNavDateCol).NumberFormat = "mmddyyyy" 
     End If
     
