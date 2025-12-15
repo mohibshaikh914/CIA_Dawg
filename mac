@@ -60,7 +60,7 @@ ErrHandler:
 End Sub
 
 ' ************************************************************************************
-' FUNCTION: Process_DataPrep_And_Merge (Headers adjusted for NAV Date/NAV split)
+' FUNCTION: Process_DataPrep_And_Merge (Loads Currency Logic and prepares new headers)
 ' ************************************************************************************
 Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
 
@@ -82,9 +82,11 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     ' Copy Variables 
     Dim lTargetCol As Long, lTargetRow As Long 
     
-    ' Ticker mapping dictionary
+    ' Ticker mapping and Ccy logic dictionaries
     Dim tickerDict As Object
+    Dim ccyLogicDict As Object ' NEW: To store the "convert" logic from BB Ticker file
     Set tickerDict = CreateObject("Scripting.Dictionary")
+    Set ccyLogicDict = CreateObject("Scripting.Dictionary")
     
     On Error GoTo ErrHandler_Step1
 
@@ -133,10 +135,11 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     
     ' *************************PART C: Ticker Mapping & Copy Filtered Data ************************
     
-    ' D) Load Ticker data into Dictionary
-    Dim dbFundGciCol As Long, dbTickerCol As Long
+    ' D) Load Ticker data and CCY Logic into Dictionaries
+    Dim dbFundGciCol As Long, dbTickerCol As Long, dbCcyCol As Long ' NEW dbCcyCol
     dbFundGciCol = HeaderIndex(loTicker, "Fund GCI")
     dbTickerCol = HeaderIndex(loTicker, "Ticker")
+    dbCcyCol = HeaderIndex(loTicker, "Ccy") ' Locate the Ccy column for conversion logic
     
     If dbFundGciCol = 0 Or dbTickerCol = 0 Then
         MsgBox "Error: Ticker file is missing 'Fund GCI' or 'Ticker' column.", vbCritical
@@ -145,13 +148,23 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     
     With loTicker.DataBodyRange
         For r = 1 To .Rows.Count
-            tickerDict(Trim(.Cells(r, dbFundGciCol).Value)) = .Cells(r, dbTickerCol).Value
+            Dim sFundGci As String
+            sFundGci = Trim(.Cells(r, dbFundGciCol).Value)
+            
+            tickerDict(sFundGci) = .Cells(r, dbTickerCol).Value ' Map Ticker
+            
+            ' Map Ccy Logic (default to empty string if column is missing or cell is empty)
+            If dbCcyCol > 0 Then
+                ccyLogicDict(sFundGci) = LCase(Trim(.Cells(r, dbCcyCol).Value))
+            Else
+                ccyLogicDict(sFundGci) = ""
+            End If
         Next r
     End With
     
     wbTicker.Close savechanges:=False
     
-    ' E) Filtered Data Copy to New Workbook (FIXED: Direct copy of selected columns)
+    ' E) Filtered Data Copy to New Workbook
     Dim arrColIndices As Variant
     arrColIndices = Array(buCol, invMgrCol, iaGciCol, reviewStatusCol, fundNameCol, _
                           fundGciCol, fundCoperCol, fundLEICol, fundCodeCol, currencyCol, _
@@ -186,7 +199,7 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
         End If
     Next i
     
-    ' Adjust the final row count after pasting (it should be the same across all columns)
+    ' Adjust the final row count after pasting
     lTargetRow = wsOut.Cells(wsOut.Rows.Count, 1).End(xlUp).Row
     If lTargetRow < 2 Then
         MsgBox "No data found after Business Unit filter.", vbExclamation
@@ -201,8 +214,14 @@ CloseAllFund:
     Dim outFundGciCol As Long
     outFundGciCol = FindHeaderInSheet(wsOut, "Fund GCI")
     
+    ' Add Ticker and BB Ccy Logic columns
     lTargetCol = wsOut.Cells(1, wsOut.Columns.Count).End(xlToLeft).Column + 1
     wsOut.Cells(1, lTargetCol).Value = "Ticker"
+    Dim tickerOutputCol As Long: tickerOutputCol = lTargetCol
+    
+    lTargetCol = lTargetCol + 1
+    wsOut.Cells(1, lTargetCol).Value = "BB Ccy Logic" ' NEW: Holds "convert" logic
+    Dim bbCcyLogicCol As Long: bbCcyLogicCol = lTargetCol
     
     Dim fundGciValue As String
     lTargetRow = wsOut.Cells(wsOut.Rows.Count, 1).End(xlUp).Row
@@ -211,7 +230,11 @@ CloseAllFund:
         fundGciValue = Trim(wsOut.Cells(r, outFundGciCol).Value)
         
         If tickerDict.Exists(fundGciValue) Then
-            wsOut.Cells(r, lTargetCol).Value = tickerDict(fundGciValue) ' Ticker found, map it
+            wsOut.Cells(r, tickerOutputCol).Value = tickerDict(fundGciValue) ' Ticker found, map it
+            ' Map Ccy Logic
+            If ccyLogicDict.Exists(fundGciValue) Then
+                wsOut.Cells(r, bbCcyLogicCol).Value = ccyLogicDict(fundGciValue)
+            End If
         Else
             wsOut.Rows(r).Delete ' Ticker NOT found, DELETE the row
         End If
@@ -281,20 +304,19 @@ SafeExit_Step1:
 End Function
 
 ' ************************************************************************************
-' SUBROUTINE: Process_Bloomberg_And_Calculate (BDH in NAV Date column, bestfwd removed)
+' SUBROUTINE: Process_Bloomberg_And_Calculate (Final Logic)
 ' ************************************************************************************
 Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
     ' === Date Input Variables ===
     Dim sStartDate As String
     Dim sEndDate As String
-    Dim dStartDate As Date
-    Dim sMonthEndTarget As String ' The calculated month-end date string (YYYYMMDD)
     
     ' === Local Declarations ===
     Dim ws As Worksheet
     Set ws = wbTarget.Sheets("CombinedData")
     Dim lRow As Long: lRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    Dim r As Long ' Loop row counter
     
     ' Batch Variables
     Const BATCH_SIZE As Long = 500 ' Process 500 rows at a time
@@ -302,6 +324,8 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     
     ' Output Columns Indexing
     Dim tickerCol As Long: tickerCol = FindHeaderInSheet(ws, "Ticker")
+    Dim currencyCol As Long: currencyCol = FindHeaderInSheet(ws, "Currency") ' Source Currency
+    Dim bbCcyLogicCol As Long: bbCcyLogicCol = FindHeaderInSheet(ws, "BB Ccy Logic") ' "convert" check
     Dim bbStatusCol As Long: bbStatusCol = FindHeaderInSheet(ws, "BB Status")
     Dim navDateCol As Long: navDateCol = FindHeaderInSheet(ws, "NAV Date") 
     Dim navCol As Long: navCol = FindHeaderInSheet(ws, "NAV")               
@@ -313,55 +337,68 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
 
     If lRow < 2 Then Exit Sub 
 
-    ' === 1. GET DATE INPUT AND CALCULATE MONTH-END TARGET ===
+    ' === 1. GET DATE INPUT (NO MONTH-END CALCULATION) ===
     
     sStartDate = Application.InputBox( _
-        Prompt:="Enter NAV Start Date (YYYYMMDD, e.g., 20251025):", _
+        Prompt:="Enter NAV Start Date (YYYYMMDD, e.g., 20251127):", _
         Title:="Bloomberg Range Start Date", Type:=2)
     If sStartDate = "False" Or sStartDate = "" Then Exit Sub
     
     sEndDate = Application.InputBox( _
-        Prompt:="Enter NAV End Date (YYYYMMDD, e.g., 20251105):", _
+        Prompt:="Enter NAV End Date (YYYYMMDD, e.g., 20251204):", _
         Title:="Bloomberg Range End Date", Type:=2)
     If sEndDate = "False" Or sEndDate = "" Then Exit Sub
     
-    ' Calculate the Month End of the Start Date
+    ' Basic date format check (Optional, but good practice)
     On Error Resume Next
-    ' Convert YYYYMMDD string to a Date object
-    dStartDate = DateSerial(Left(sStartDate, 4), Mid(sStartDate, 5, 2), Right(sStartDate, 2))
-    If Err.Number <> 0 Then
+    If Not IsDate(DateSerial(Left(sStartDate, 4), Mid(sStartDate, 5, 2), Right(sStartDate, 2))) Then
         MsgBox "Invalid Start Date format. Please use YYYYMMDD.", vbCritical
+        Exit Sub
+    End If
+    If Not IsDate(DateSerial(Left(sEndDate, 4), Mid(sEndDate, 5, 2), Right(sEndDate, 2))) Then
+        MsgBox "Invalid End Date format. Please use YYYYMMDD.", vbCritical
         Exit Sub
     End If
     On Error GoTo 0
     
-    ' Calculate the last day of the month for dStartDate
-    sMonthEndTarget = Format(DateSerial(Year(dStartDate), Month(dStartDate) + 1, 0), "yyyymmdd")
-
-    ' === 2. BATCH PROCESSING LOOP (Applying BDH formula) ===
+    ' === 2. BATCH PROCESSING LOOP (Applying BDH formula with Currency Logic) ===
     For lStartRow = 2 To lRow Step BATCH_SIZE
         lEndRow = lStartRow + BATCH_SIZE - 1
         If lEndRow > lRow Then lEndRow = lRow
         
-        ' 2A. Apply Bloomberg Formulas 
-        
-        ' BB Status Formula 
-        ws.Cells(lStartRow, bbStatusCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""MARKET_STATUS""),""#N/A"")"
-        
-        ' ** BDH FORMULA: Targets NAV Date column. Uses Month End as start, End Date as end. **
-        ' Parameter "col=2;rows=1" outputs Date (col 1) in NAV Date, and Value (col 2) in NAV.
-        ws.Cells(lStartRow, navDateCol).FormulaR1C1 = _
-            "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sMonthEndTarget & """,""" & sEndDate & """,""points=1"",""col=2;rows=1"")"
+        ' Apply BDH formulas row by row within the batch to handle currency overrides
+        For r = lStartRow To lEndRow
+            Dim sBDHFormula As String
+            Dim sCcyOverride As String
             
-        ' BB Currency Formula 
-        ws.Cells(lStartRow, bbCcyCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""CURRENCY""),""#N/A"")"
+            ' Check for "convert" logic
+            If LCase(Trim(ws.Cells(r, bbCcyLogicCol).Value)) = "convert" Then
+                ' Get the target currency from the 'Currency' column and build the override
+                sCcyOverride = ",""currency=" & Trim(ws.Cells(r, currencyCol).Value) & """"
+            Else
+                sCcyOverride = ""
+            End If
+            
+            ' A) BB Status Formula 
+            ws.Cells(r, bbStatusCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""MARKET_STATUS""),""#N/A"")"
+            
+            ' B) BDH Formula (FROZEN STRUCTURE)
+            ' BDH formula is placed in NAV Date column (Date output)
+            sBDHFormula = "=BDH(RC" & tickerCol & ",""FUND_TOTAL_ASSETS"",""" & sStartDate & """,""" & sEndDate & """,""points=1""" & sCcyOverride & ")"
+            ws.Cells(r, navDateCol).FormulaR1C1 = sBDHFormula
+            
+            ' C) BB Currency Formula (Uses BDP to retrieve the currency the BDH value is displayed in)
+            If sCcyOverride <> "" Then
+                ' If converted, show the source Currency (which is the target currency of the override)
+                ws.Cells(r, bbCcyCol).Value = Trim(ws.Cells(r, currencyCol).Value)
+            Else
+                ' If not converted, retrieve the Ticker's default currency
+                ws.Cells(r, bbCcyCol).FormulaR1C1 = "=IFERROR(BDP(RC" & tickerCol & ",""CURRENCY""),""#N/A"")"
+            End If
+            
+        Next r
 
-        ' Fill formulas down for the current batch
-        ws.Range(ws.Cells(lStartRow, bbStatusCol), ws.Cells(lEndRow, bbStatusCol)).FillDown
-        ws.Range(ws.Cells(lStartRow, navDateCol), ws.Cells(lEndRow, navDateCol)).FillDown
-        ws.Range(ws.Cells(lStartRow, bbCcyCol), ws.Cells(lEndRow, bbCcyCol)).FillDown
-        
-        ' 2B. Force calculation and yield control to OS after each batch
+        ' Force calculation and yield control to OS after each batch
         Application.Calculate 
         DoEvents 
         
@@ -376,8 +413,9 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     ' Formatting for Delta
     ws.Columns(deltaCol).NumberFormat = "0.00%"
     
-    ' Commenting Logic (Generic comment)
-    ws.Range(ws.Cells(2, commentsCol), ws.Cells(lRow, commentsCol)).FormulaR1C1 = """CHECK DELTA AFTER BLOOMBERG REFRESH"""
+    ' NEW Commenting Logic: CHECK if Delta is >= +50% OR <= -50%, otherwise UPDATE
+    ws.Cells(2, commentsCol).FormulaR1C1 = "=IF(OR(RC" & deltaCol & ">=0.5, RC" & deltaCol & "<=-0.5), ""CHECK"", ""UPDATE"")"
+    ws.Range(ws.Cells(2, commentsCol), ws.Cells(lRow, commentsCol)).FillDown
     
     ' === 4. LATEST NAV DATE FORMATTING FIX ===
     
