@@ -1,13 +1,13 @@
 Option Explicit
 
 ' ************************************************************************************
-' MASTER MACRO: BBG NAV (High-Performance Batch Version)
+' MASTER MACRO: BBG NAV (Optimized for Speed)
 ' ************************************************************************************
 Sub RunAllProcesses_OneClick()
     Dim wbProcessed As Workbook
     Const OUTPUT_FILENAME As String = "Processed_Master_Data_NAV.xlsx"
 
-    ' Disable background processes to maximize speed
+    ' Optimization: Disable UI updates and set calculation to manual
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.DisplayAlerts = False
@@ -15,14 +15,14 @@ Sub RunAllProcesses_OneClick()
     
     On Error GoTo ErrHandler
     
-    ' 1. Data Preparation and Merging
+    ' 1. EXECUTION STEP 1: Data Preparation
     Set wbProcessed = Process_DataPrep_And_Merge(OUTPUT_FILENAME)
     
     If Not wbProcessed Is Nothing Then
-        ' 2. High-Speed Bloomberg Data Retrieval
+        ' 2. EXECUTION STEP 2: Bloomberg Data Extraction
         Call Process_Bloomberg_Fast(wbProcessed)
         
-        ' 3. Finalization and Save
+        ' Final save and cleanup
         Application.Calculation = xlCalculationAutomatic 
         wbProcessed.SaveAs Filename:=ThisWorkbook.Path & "\" & OUTPUT_FILENAME, FileFormat:=xlOpenXMLWorkbook
         wbProcessed.Close SaveChanges:=False
@@ -38,29 +38,26 @@ SafeExit:
     Exit Sub
     
 ErrHandler:
-    MsgBox "An error occurred during execution: " & Err.Description, vbCritical
+    MsgBox "An error occurred: " & Err.Description, vbCritical
     Resume SafeExit
 End Sub
 
 ' ************************************************************************************
-' SUBROUTINE: Process_Bloomberg_Fast
+' SUBROUTINE: Process_Bloomberg_Fast (Batch Injection)
 ' ************************************************************************************
 Sub Process_Bloomberg_Fast(ByVal wbTarget As Workbook)
     Dim sStart As String, sEnd As String, ws As Worksheet
     Dim r As Long, lRow As Long
     Dim tCol As Long, navDateCol As Long, navValCol As Long, latNavCol As Long
     Dim deltaCol As Long, comCol As Long, bbcLCol As Long, ccyCol As Long, statCol As Long
-    Dim ccyOverride As String
     
     Set ws = wbTarget.Sheets("CombinedData")
     lRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
     
-    ' Get Date Inputs
     sStart = Application.InputBox("Enter Start Date (YYYYMMDD):", "Date Range", Type:=2)
     sEnd = Application.InputBox("Enter End Date (YYYYMMDD):", "Date Range", Type:=2)
     If sStart = "False" Or sEnd = "False" Then Exit Sub
 
-    ' Identify Column Indices Dynamically
     tCol = FindHeaderInSheet(ws, "Ticker")
     navDateCol = FindHeaderInSheet(ws, "NAV Date")
     navValCol = FindHeaderInSheet(ws, "NAV")
@@ -71,33 +68,32 @@ Sub Process_Bloomberg_Fast(ByVal wbTarget As Workbook)
     ccyCol = FindHeaderInSheet(ws, "Currency")
     statCol = FindHeaderInSheet(ws, "BB Status")
 
-    ' Step A: Batch Inject Market Status
+    ' Inject Market Status in Bulk
     ws.Range(ws.Cells(2, statCol), ws.Cells(lRow, statCol)).FormulaR1C1 = _
         "=IFERROR(BDP(RC" & tCol & ",""MARKET_STATUS""),""#N/A"")"
 
-    ' Step B: Batch Inject BDH Formulas (Processing logic per row for Currency)
+    ' Inject BDH Formulas
     For r = 2 To lRow
-        ccyOverride = ""
+        Dim ccyOverride As String: ccyOverride = ""
         If LCase(Trim(ws.Cells(r, bbcLCol).Value)) = "convert" Then
             ccyOverride = ",""currency=" & Trim(ws.Cells(r, ccyCol).Value) & """"
         End If
         ws.Cells(r, navDateCol).FormulaR1C1 = "=BDH(RC" & tCol & ",""FUND_TOTAL_ASSETS"",""" & sStart & """,""" & sEnd & """,""points=1""" & ccyOverride & ")"
     Next r
 
-    ' Step C: Trigger Calculation and Wait for Bloomberg API Response
+    ' Wait for Bloomberg API
     Application.Calculate
-    Application.Wait (Now + TimeValue("0:00:06")) ' 6-second buffer for API population
+    Application.Wait (Now + TimeValue("0:00:06"))
     DoEvents
     Application.Calculate
 
-    ' Step D: Batch Inject Delta and Comment Formulas
+    ' Final Calculations
     ws.Range(ws.Cells(2, deltaCol), ws.Cells(lRow, deltaCol)).FormulaR1C1 = _
         "=IFERROR((RC" & navValCol & " - RC" & latNavCol & ") / RC" & latNavCol & ", 0)"
     
     ws.Range(ws.Cells(2, comCol), ws.Cells(lRow, comCol)).FormulaR1C1 = _
         "=IF(OR(RC" & deltaCol & ">=0.5, RC" & deltaCol & "<=-0.5), ""CHECK"", ""UPDATE"")"
 
-    ' Final Formatting
     ws.Columns(deltaCol).NumberFormat = "0.00%"
 End Sub
 
@@ -110,16 +106,12 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     Dim loTicker As ListObject, loAllFund As ListObject
     Dim sFilePath As String, r As Long, i As Long
     Dim tickerDict As Object, ccyLogicDict As Object
-    Dim buCol As Long, fundGciCol As Long, latNavCol As Long, latDateCol As Long
-    Dim dbGci As Long, dbTick As Long, dbCcy As Long
-    Dim arrCols As Variant
     
     Set tickerDict = CreateObject("Scripting.Dictionary")
     Set ccyLogicDict = CreateObject("Scripting.Dictionary")
     
     On Error GoTo PrepError
 
-    ' File Selection
     sFilePath = GetFilePath("Select All Funds CSV"): If sFilePath = "" Then Exit Function
     Set wbAllFund = Workbooks.Open(sFilePath): Set wsAllFund = wbAllFund.Sheets(1)
     
@@ -129,34 +121,27 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     sFilePath = GetFilePath("Select BB Ticker Excel"): If sFilePath = "" Then Exit Function
     Set wbTicker = Workbooks.Open(sFilePath): Set wsTicker = wbTicker.Sheets(1)
     
-    ' Initialize Tables
     Set loTicker = SetupListObject(wsTicker, "TickerTbl")
     If wsAllFund.UsedRange.Rows.Count > 0 Then wsAllFund.Rows(1).Delete
     Set loAllFund = SetupListObject(wsAllFund, "AllFundsTbl")
     
-    ' Identify Headers
-    buCol = HeaderIndex(loAllFund, "Business Unit")
-    fundGciCol = HeaderIndex(loAllFund, "Fund GCI")
-    latNavCol = HeaderIndex(loAllFund, "Latest NAV")
-    latDateCol = HeaderIndex(loAllFund, "Latest NAV date")
+    Dim buIdx As Long: buIdx = HeaderIndex(loAllFund, "Business Unit")
+    loAllFund.Range.AutoFilter Field:=buIdx, Criteria1:=Array("FI-EMEA", "FI-US", "FI-GMC-Asia"), Operator:=xlFilterValues
     
-    ' Apply Filters
-    loAllFund.Range.AutoFilter Field:=buCol, Criteria1:=Array("FI-EMEA", "FI-US", "FI-GMC-Asia"), Operator:=xlFilterValues
-    
-    ' Load Ticker Dictionary
-    dbGci = HeaderIndex(loTicker, "Fund GCI")
-    dbTick = HeaderIndex(loTicker, "Ticker")
-    dbCcy = HeaderIndex(loTicker, "Ccy")
+    ' Load Tickers
+    Dim dbGci As Long: dbGci = HeaderIndex(loTicker, "Fund GCI")
+    Dim dbTick As Long: dbTick = HeaderIndex(loTicker, "Ticker")
+    Dim dbCcy As Long: dbCcy = HeaderIndex(loTicker, "Ccy")
     For r = 1 To loTicker.DataBodyRange.Rows.Count
         tickerDict(Trim(loTicker.DataBodyRange.Cells(r, dbGci).Value)) = loTicker.DataBodyRange.Cells(r, dbTick).Value
         ccyLogicDict(Trim(loTicker.DataBodyRange.Cells(r, dbGci).Value)) = LCase(Trim(loTicker.DataBodyRange.Cells(r, dbCcy).Value))
     Next r
-    wbTicker.Close SaveChanges:=False
+    wbTicker.Close False
 
-    ' Construct Output Sheet
+    ' Create Output
     Set wbOut = Workbooks.Add(xlWBATWorksheet): Set wsOut = wbOut.Sheets(1)
     wsOut.Name = "CombinedData"
-    arrCols = Array(buCol, HeaderIndex(loAllFund, "Fund name"), fundGciCol, latNavCol, latDateCol, HeaderIndex(loAllFund, "Currency"))
+    Dim arrCols As Variant: arrCols = Array(buIdx, HeaderIndex(loAllFund, "Fund name"), HeaderIndex(loAllFund, "Fund GCI"), HeaderIndex(loAllFund, "Latest NAV"), HeaderIndex(loAllFund, "Latest NAV date"), HeaderIndex(loAllFund, "Currency"))
     
     For i = LBound(arrCols) To UBound(arrCols)
         loAllFund.ListColumns(arrCols(i)).Range.Resize(, 1).SpecialCells(xlCellTypeVisible).Copy
@@ -168,4 +153,55 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     Dim ccyLIdx As Long: ccyLIdx = AddNewHeader(wsOut, "BB Ccy Logic")
     Dim outGciIdx As Long: outGciIdx = FindHeaderInSheet(wsOut, "Fund GCI")
     
-    For r = wsOut.Cells(wsOut.Rows.Count,
+    For r = wsOut.Cells(wsOut.Rows.Count, 1).End(xlUp).Row To 2 Step -1
+        Dim gciKey As String: gciKey = Trim(wsOut.Cells(r, outGciIdx).Value)
+        If tickerDict.Exists(gciKey) Then
+            wsOut.Cells(r, tColIdx).Value = tickerDict(gciKey)
+            wsOut.Cells(r, ccyLIdx).Value = ccyLogicDict(gciKey)
+        Else
+            wsOut.Rows(r).Delete
+        End If
+    Next r
+    
+    Call AddNewHeader(wsOut, "BB Status")
+    Call AddNewHeader(wsOut, "NAV Date")
+    Call AddNewHeader(wsOut, "NAV")
+    Call AddNewHeader(wsOut, "Delta")
+    Call AddNewHeader(wsOut, "Comment")
+    
+    wbAllFund.Close False: wbATE.Close False
+    Set Process_DataPrep_And_Merge = wbOut
+    Exit Function
+
+PrepError:
+    MsgBox "Data Prep Error: " & Err.Description
+    Set Process_DataPrep_And_Merge = Nothing
+End Function
+
+' --- Helper Functions (Must be in the same module) ---
+
+Private Function SetupListObject(ws As Worksheet, n As String) As ListObject
+    Do While ws.ListObjects.Count > 0: ws.ListObjects(1).Unlist: Loop
+    Set SetupListObject = ws.ListObjects.Add(xlSrcRange, ws.Range("A1").CurrentRegion, , xlYes)
+End Function
+
+Private Function HeaderIndex(lo As ListObject, hName As String) As Long
+    Dim c As Range: For Each c In lo.HeaderRowRange.Cells
+        If LCase(Trim(c.Value)) = LCase(Trim(hName)) Then HeaderIndex = c.Column: Exit Function
+    Next c
+End Function
+
+Private Function FindHeaderInSheet(ws As Worksheet, hName As String) As Long
+    Dim r As Range: Set r = ws.Rows(1).Find(What:=hName, LookIn:=xlValues, LookAt:=xlWhole)
+    If Not r Is Nothing Then FindHeaderInSheet = r.Column
+End Function
+
+Private Function AddNewHeader(ws As Worksheet, hName As String) As Long
+    Dim lc As Long: lc = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column + 1
+    ws.Cells(1, lc).Value = hName: AddNewHeader = lc
+End Function
+
+Private Function GetFilePath(t As String) As String
+    Dim f As FileDialog: Set f = Application.FileDialog(msoFileDialogFilePicker)
+    f.Title = t: If f.Show = -1 Then GetFilePath = f.SelectedItems(1)
+End Function
