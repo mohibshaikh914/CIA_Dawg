@@ -7,44 +7,43 @@ Sub RunAllProcesses_OneClick()
     Dim wbProcessed As Workbook
     Const OUTPUT_FILENAME As String = "Processed_Master_Data_NPS.xlsx"
 
+    ' Optimization: Disable background processes for speed
     Application.ScreenUpdating = False
     Application.EnableEvents = False
     Application.DisplayAlerts = False
     Application.Calculation = xlCalculationManual 
-    
+
     On Error GoTo ErrHandler
-    
-    ' 1. EXECUTION STEP 1: Data Preparation
+
+    ' 1. EXECUTION STEP 1: Data Preparation and File Merging
     Set wbProcessed = Process_DataPrep_And_Merge(OUTPUT_FILENAME)
-    
+
     If Not wbProcessed Is Nothing Then
         ' 2. EXECUTION STEP 2: Bloomberg NPS Extraction and Calculation 
         Call Process_Bloomberg_And_Calculate(wbProcessed)
-        
-        ' Save the final file
+
+        ' Save the final output file in the same path as this workbook
         Application.Calculation = xlCalculationAutomatic 
         wbProcessed.SaveAs Filename:=ThisWorkbook.Path & "\" & OUTPUT_FILENAME, FileFormat:=xlOpenXMLWorkbook
         wbProcessed.Close savechanges:=False
-        
-        MsgBox "SUCCESS! The NPS process is completed. Final file: '" & OUTPUT_FILENAME & "'", vbInformation
-    Else
-        ' If we are here, Process_DataPrep_And_Merge handled the error message
+
+        MsgBox "SUCCESS! The NPS process is completed." & vbCrLf & "Final file: " & OUTPUT_FILENAME, vbInformation
     End If
-    
+
 SafeExit:
     Application.Calculation = xlCalculationAutomatic
     Application.DisplayAlerts = True
     Application.EnableEvents = True
     Application.ScreenUpdating = True
     Exit Sub
-    
+
 ErrHandler:
     MsgBox "An unexpected error occurred: " & Err.Description, vbCritical
     Resume SafeExit
 End Sub
 
 ' ************************************************************************************
-' FUNCTION: Process_DataPrep_And_Merge (With enhanced error reporting)
+' FUNCTION: Process_DataPrep_And_Merge
 ' ************************************************************************************
 Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     Dim wbTicker As Workbook, wsTicker As Worksheet, loTicker As ListObject
@@ -54,86 +53,92 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     Dim sFilePath As String, r As Long, i As Long
     Dim tickerDict As Object, ccyLogicDict As Object, ateD As Object
     Dim buCol As Long, fundGciCol As Long, latestNpsCol As Long, latestNpsDateCol As Long
-    Dim arrColIndices As Variant, colName As Variant
+    Dim arrColIndices As Variant
     
+    ' Initialize Dictionaries for mapping
     Set tickerDict = CreateObject("Scripting.Dictionary")
     Set ccyLogicDict = CreateObject("Scripting.Dictionary")
-    
-    ' 1. OPEN FILES
-    sFilePath = GetFilePath("Select the All Funds CSV file"): If sFilePath = "" Then Exit Function
+
+    ' 1. OPEN SOURCE FILES
+    sFilePath = GetFilePath("Select the All Funds CSV file"): If sFilePath = "" Then GoTo CleanUp
     Set wbAllFund = Workbooks.Open(sFilePath): Set wsAllFund = wbAllFund.Sheets(1)
-    
-    sFilePath = GetFilePath("Select the ATE CSV file"): If sFilePath = "" Then Exit Function
+
+    sFilePath = GetFilePath("Select the ATE CSV file"): If sFilePath = "" Then GoTo CleanUp
     Set wbATE = Workbooks.Open(sFilePath): Set wsATE = wbATE.Sheets(1)
-    
-    sFilePath = GetFilePath("Select the BB Ticker Excel file"): If sFilePath = "" Then Exit Function
+
+    sFilePath = GetFilePath("Select the BB Ticker Excel file"): If sFilePath = "" Then GoTo CleanUp
     Set wbTicker = Workbooks.Open(sFilePath): Set wsTicker = wbTicker.Sheets(1)
-    
-    ' 2. SETUP TABLES
+
+    ' 2. SETUP DATA TABLES
     Set loTicker = SetupListObject(wsTicker, "TickerTbl")
-    If wsAllFund.UsedRange.Rows.Count > 0 Then wsAllFund.Rows(1).Delete 
+    ' Cleanup All Fund headers if necessary (Removes empty first row often found in CSVs)
+    If wsAllFund.UsedRange.Rows.Count > 0 And wsAllFund.Cells(1, 1).Value = "" Then wsAllFund.Rows(1).Delete 
     Set loAllFund = SetupListObject(wsAllFund, "AllFundsTbl")
-    
+
     ' 3. VALIDATE REQUIRED COLUMNS
     buCol = HeaderIndex(loAllFund, "Business Unit")
     fundGciCol = HeaderIndex(loAllFund, "Fund GCI")
     latestNpsCol = HeaderIndex(loAllFund, "Latest NAV per share")
     latestNpsDateCol = HeaderIndex(loAllFund, "Latest NAV per share date")
-    
+
     If buCol = 0 Or fundGciCol = 0 Or latestNpsCol = 0 Then
-        MsgBox "Error: 'All Funds' file is missing required columns (Business Unit, Fund GCI, or Latest NAV per share).", vbCritical
+        MsgBox "Error: 'All Funds' file is missing required columns.", vbCritical
         GoTo CleanUp
     End If
 
-    ' 4. FILTER AND COPY DATA
+    ' 4. FILTER AND INITIALIZE OUTPUT
     loAllFund.Range.AutoFilter Field:=buCol, Criteria1:=Array("FI-EMEA", "FI-US", "FI-GMC-Asia"), Operator:=xlFilterValues
-    
+
     Set wbOut = Workbooks.Add(xlWBATWorksheet): Set wsOut = wbOut.Sheets(1)
     wsOut.Name = "CombinedData"
-    
-    ' Select target columns to copy
+
+    ' Define columns to transfer
     arrColIndices = Array(buCol, HeaderIndex(loAllFund, "Investment Manager"), _
                           HeaderIndex(loAllFund, "IA GCI"), HeaderIndex(loAllFund, "Review status"), _
                           HeaderIndex(loAllFund, "Fund name"), fundGciCol, _
                           HeaderIndex(loAllFund, "Fund Coper"), HeaderIndex(loAllFund, "Fund LEI"), _
                           HeaderIndex(loAllFund, "Fund code"), HeaderIndex(loAllFund, "Currency"), _
                           latestNpsCol, latestNpsDateCol)
-    
+
     For i = LBound(arrColIndices) To UBound(arrColIndices)
         If arrColIndices(i) > 0 Then
             loAllFund.ListColumns(arrColIndices(i)).Range.Resize(, 1).SpecialCells(xlCellTypeVisible).Copy
             wsOut.Cells(1, i + 1).PasteSpecial Paste:=xlPasteValues 
         End If
     Next i
+    
+    ' --- FIX: CLOSE ALL FUND IMMEDIATELY AFTER COPYING ---
+    wbAllFund.Close savechanges:=False
 
-    ' 5. TICKER MAPPING
+    ' 5. TICKER AND CURRENCY LOGIC MAPPING
     Dim dbGci As Long, dbTick As Long, dbCcy As Long
     dbGci = HeaderIndex(loTicker, "Fund GCI"): dbTick = HeaderIndex(loTicker, "Ticker"): dbCcy = HeaderIndex(loTicker, "Ccy")
-    
+
     If dbGci > 0 And dbTick > 0 Then
         For r = 1 To loTicker.DataBodyRange.Rows.Count
-            tickerDict(Trim(loTicker.DataBodyRange.Cells(r, dbGci).Value)) = loTicker.DataBodyRange.Cells(r, dbTick).Value
-            If dbCcy > 0 Then ccyLogicDict(Trim(loTicker.DataBodyRange.Cells(r, dbGci).Value)) = LCase(Trim(loTicker.DataBodyRange.Cells(r, dbCcy).Value))
+            Dim gKey As String: gKey = Trim(loTicker.DataBodyRange.Cells(r, dbGci).Value)
+            tickerDict(gKey) = loTicker.DataBodyRange.Cells(r, dbTick).Value
+            If dbCcy > 0 Then ccyLogicDict(gKey) = LCase(Trim(loTicker.DataBodyRange.Cells(r, dbCcy).Value))
         Next r
     End If
     wbTicker.Close savechanges:=False
-    
-    ' Final cleanup of unmapped rows
+
+    ' Apply Ticker mapping and remove unmapped rows
     Dim outGciCol As Long: outGciCol = FindHeaderInSheet(wsOut, "Fund GCI")
     Dim tCol As Long, ccyLCol As Long
     tCol = AddNewHeader(wsOut, "Ticker"): ccyLCol = AddNewHeader(wsOut, "BB Ccy Logic")
-    
+
     For r = wsOut.Cells(wsOut.Rows.Count, 1).End(xlUp).Row To 2 Step -1
-        Dim gciVal As String: gciVal = Trim(wsOut.Cells(r, outGciCol).Value)
-        If tickerDict.Exists(gciVal) Then
-            wsOut.Cells(r, tCol).Value = tickerDict(gciVal)
-            wsOut.Cells(r, ccyLCol).Value = ccyLogicDict(gciVal)
+        Dim gVal As String: gVal = Trim(wsOut.Cells(r, outGciCol).Value)
+        If tickerDict.Exists(gVal) Then
+            wsOut.Cells(r, tCol).Value = tickerDict(gVal)
+            wsOut.Cells(r, ccyLCol).Value = ccyLogicDict(gVal)
         Else
-            wsOut.Rows(r).Delete
+            wsOut.Rows(r).Delete ' Row not found in Ticker file
         End If
     Next r
-    
-    ' 6. ATE MATCH
+
+    ' 6. ATE MATCHING
     Set loATE = SetupListObject(wsATE, "ATETbl")
     Dim ateGci As Long: ateGci = HeaderIndex(loATE, "Fund GCI")
     If ateGci > 0 Then
@@ -146,14 +151,14 @@ Function Process_DataPrep_And_Merge(ByVal sOutputName As String) As Workbook
     End If
     wbATE.Close savechanges:=False
 
-    ' 7. ADD FINAL HEADERS
+    ' 7. PREPARE FINAL OUTPUT COLUMNS
     Call AddNewHeader(wsOut, "BB Status")
     Call AddNewHeader(wsOut, "NPS Date")
     Call AddNewHeader(wsOut, "NPS")
     Call AddNewHeader(wsOut, "BB ccy")
     Call AddNewHeader(wsOut, "Delta")
     Call AddNewHeader(wsOut, "Comment")
-    
+
     Set Process_DataPrep_And_Merge = wbOut
     Exit Function
 
@@ -170,11 +175,13 @@ End Function
 Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     Dim sStart As String, sEnd As String, ws As Worksheet, r As Long, lRow As Long
     Set ws = wbTarget.Sheets("CombinedData"): lRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
-    
+
+    ' User input for historical range
     sStart = Application.InputBox("Enter NPS Start Date (YYYYMMDD):", "Date Range", Type:=2)
     sEnd = Application.InputBox("Enter NPS End Date (YYYYMMDD):", "Date Range", Type:=2)
     If sStart = "False" Or sEnd = "False" Then Exit Sub
 
+    ' Map column numbers for formula creation
     Dim tCol As Long: tCol = FindHeaderInSheet(ws, "Ticker")
     Dim npsDateCol As Long: npsDateCol = FindHeaderInSheet(ws, "NPS Date")
     Dim npsValCol As Long: npsValCol = FindHeaderInSheet(ws, "NPS")
@@ -182,32 +189,42 @@ Sub Process_Bloomberg_And_Calculate(ByVal wbTarget As Workbook)
     Dim latDateCol As Long: latDateCol = FindHeaderInSheet(ws, "Latest NAV per share date")
     Dim deltaCol As Long: deltaCol = FindHeaderInSheet(ws, "Delta")
     Dim comCol As Long: comCol = FindHeaderInSheet(ws, "Comment")
+    Dim ccyLogicCol As Long: ccyLogicCol = FindHeaderInSheet(ws, "BB Ccy Logic")
+    Dim sourceCcyCol As Long: sourceCcyCol = FindHeaderInSheet(ws, "Currency")
 
     For r = 2 To lRow
-        ' BB Status
+        ' Check Bloomberg Market Status
         ws.Cells(r, FindHeaderInSheet(ws, "BB Status")).FormulaR1C1 = "=IFERROR(BDP(RC" & tCol & ",""MARKET_STATUS""),""#N/A"")"
-        ' BDH Formula
-        Dim ccyOverride As String: ccyOverride = ""
-        If LCase(ws.Cells(r, FindHeaderInSheet(ws, "BB Ccy Logic")).Value) = "convert" Then
-            ccyOverride = ",""currency=" & ws.Cells(r, FindHeaderInSheet(ws, "Currency")).Value & """"
-        End If
-        ws.Cells(r, npsDateCol).FormulaR1C1 = "=BDH(RC" & tCol & ",""FUND_NET_ASSET_VAL"",""" & sStart & """,""" & sEnd & """,""points=1""" & ccyOverride & ")"
         
-        If r Mod 500 = 0 Then DoEvents
+        ' Bloomberg Data History (BDH) with Currency Override
+        Dim ccyOverride As String: ccyOverride = ""
+        ' --- CHALLENGE 2: CURRENCY CONVERSION LOGIC ---
+        If LCase(ws.Cells(r, ccyLogicCol).Value) = "convert" Then
+            ccyOverride = ",""currency=" & ws.Cells(r, sourceCcyCol).Value & """"
+        End If
+        
+        ws.Cells(r, npsDateCol).FormulaR1C1 = "=BDH(RC" & tCol & ",""FUND_NET_ASSET_VAL"",""" & sStart & """,""" & sEnd & """,""points=1""" & ccyOverride & ")"
+
+        If r Mod 100 = 0 Then DoEvents ' Prevent Excel from freezing
     Next r
 
+    ' Refresh formulas and perform calculations
     Application.Calculate
+    
+    ' Delta and Commenting
     ws.Cells(2, deltaCol).FormulaR1C1 = "=IFERROR((RC" & npsValCol & " - RC" & latNpsCol & ") / RC" & latNpsCol & ", 0)"
     ws.Range(ws.Cells(2, deltaCol), ws.Cells(lRow, deltaCol)).FillDown
     ws.Columns(deltaCol).NumberFormat = "0.00%"
-    
+
     ws.Cells(2, comCol).FormulaR1C1 = "=IF(OR(RC" & deltaCol & ">=0.5, RC" & deltaCol & "<=-0.5), ""CHECK"", ""UPDATE"")"
     ws.Range(ws.Cells(2, comCol), ws.Cells(lRow, comCol)).FillDown
-    ws.Columns(latDateCol).NumberFormat = "mmddyyyy"
+    
+    ' Formatting Dates
+    ws.Columns(latDateCol).NumberFormat = "mm/dd/yyyy"
 End Sub
 
 ' ************************************************************************************
-' HELPERS
+' HELPER FUNCTIONS
 ' ************************************************************************************
 Private Function SetupListObject(ws As Worksheet, n As String) As ListObject
     If ws Is Nothing Then Exit Function
